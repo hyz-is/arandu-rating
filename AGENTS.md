@@ -1,99 +1,106 @@
 # Working on Arandu Rating
 
-This is an Arandu package: one entity with an embedded Hesape Model, one policy
-that decides about it, one service that owns the database handle, and the routes
-that reach them.
-It is a Go module somebody `go get`s and registers by hand in their own
-`bootstrap/app.go`, which is the whole difference from working in an
-application. There is no service provider, no container and no discovery — if a
-line of wiring is not written in the installer's repository, it does not happen.
+This is an Arandu package: ratings with stars, reports and moderation for a
+multi-tenant application, for the accounts that rate, for the owners of what is
+rated, and for the platform team that moderates, as three separate sides. Two
+entities with embedded Hesape Models (`Rating`, `Report`), three policies, three
+services that own the database handle, and the routes that reach them. It is a Go
+module somebody `go get`s and registers by hand in their own `bootstrap/app.go`,
+which is the whole difference from working in an application. There is no service
+provider, no container and no discovery — if a line of wiring is not written in
+the installer's repository, it does not happen.
 
 Read `.agents/skills/` before writing code. Each skill is a procedure, and the
 one you need is named by the situation you are in.
 
 ## The gates
 
-Nothing is finished until all four exit zero.
+Nothing is finished until all of these exit zero.
 
 ```sh
 export GOWORK=off
 gofmt -l $(find . -name '*.go' -not -path '*/testdata/*' -not -name '*.kyse.go')
 go build ./...
 go vet ./...
-go test -race ./...
+go test -race -p 2 ./...
+aru model:build --check
 ```
 
-`GOWORK=off` is not borrowed from somewhere else, and here it is not a
-preference either. This checkout may sit beside a Go workspace that lists the
-framework repositories and does not list this one; when it does, every command
-above fails before it compiles anything:
+`GOWORK=off` is not a preference. This checkout may sit beside a Go workspace
+that lists the framework repositories and does not list this one; when it does,
+every command above fails before compiling anything with *"directory prefix .
+does not contain modules listed in go.work"*. With the workspace off, the module
+resolves the versions in `go.mod`, which is what CI compiles against and what
+somebody's `go get` gets. `-p 2` because the machine is shared.
 
-```
-pattern ./...: directory prefix . does not contain modules listed in go.work
-or their selected dependencies
-```
+`go.mod` asks for Go 1.26.10. A toolchain older than that stops with *"go.mod
+requires go >= 1.26.10"*; run the gates with `GOTOOLCHAIN=go1.26.10` (or
+`auto`) rather than lowering the line.
 
-With the workspace off, the module resolves the framework version in `go.mod` —
-which is what CI compiles against, and what somebody's `go get` will get.
-
-Both filters on `gofmt` are load-bearing in the toolchain even where this
-repository has nothing for them to skip: `gofmt` is the only tool in the chain
-that ignores build tags, and `testdata/` is where a fixture is allowed to be
-invalid on purpose.
-
-`aru doctor` is not one of the gates, and running it here costs a minute and
-answers nothing:
+`aru doctor` is not one of the gates, and running it here answers nothing:
 
 ```
 this is not an Arandu project: no go.mod, main.go and arandu.toml together.
-Run it from inside a project, or create one with `aru new`
 ```
 
-It exits 1. It reads applications, and this is a library.
-
-It does not read this one after it is installed either, and that is why
-`tests/Unit/audit_test.go` exists. The doctor walks the application's own tree,
-skips `vendor/`, and opens the one `arandu.mod.toml` at its root; it never loads
-a dependency. So `tenant-from-request`, `system-grant-without-tenant` and
-`permission-not-declared` never see a line of an installed package, and whatever
-this one must prove about itself it proves in its own suite or nowhere.
+It exits 1. It reads applications, and this is a library. It does not read this
+one after it is installed either: the doctor walks the application's own tree
+and never loads a dependency, so `tenant-from-request`,
+`system-grant-outside-scope` and `permission-not-declared` never see a line of
+an installed package. That is why `tests/Unit/audit_test.go` exists: whatever
+this package must prove about itself it proves in its own suite or nowhere.
 
 ## What this repository holds
 
 | | measured with |
 | --- | --- |
-| 7 Go files, one per role and one generated, all in one package at the root | `grep -l '^package rating' *.go` |
-| 6 test files, 44 tests | `find tests -name '*_test.go'` · `go test -count=1 ./... -v \| grep -c '^--- PASS'` |
-| 3 routes | `grep -c 'r.Action' module.go` |
-| 5 actions the policy answers about | `grep -cE '^\t[A-Za-z]+ security.Action = ' policy.go` |
-| 2 direct dependencies, both under `arandu-io` | `go list -m -f '{{if and (not .Indirect) (not .Main)}}{{.Path}} {{.Version}}{{end}}' all` |
+| 18 Go files at the root, one per role, two of them generated | `ls *.go \| wc -l` |
+| 1 internal package (`internal/platform`), the tables that read every tenant | `find internal -name '*.go'` |
+| 14 routes: 6 for the author, 5 for the owner, 3 for the moderation | `grep -c '{"rating\.' config.go` |
+| 11 actions: 9 for customers, 2 for the team | `grep -cE '^\t[A-Za-z]+ security.Action = ' policy.go` |
+| 9 views, 2 locales | `find resources -type f` |
+| 1 migration, creating 2 tables | `grep -c 'Create(ctx' migrations.go` |
 
-The layout is by role rather than by layer, so the package reads top to bottom:
+The layout is by role rather than by layer:
 
 ```
-module.go         registration, routes, handlers and migrations
-config.go         what the application passes in
-model.go          the entity, its table, its own rules, and what it may answer with
-RatingQuery.go  the query on that table, generated by aru model:build
-policy.go         who may do what
-service.go        validation, authorization and persistence with the Grant
-views.go          the files the application takes ownership of
+module.go        registration, routes, the contract with the framework
+config.go        what the application passes in, and the route table
+contracts.go     what the application implements: Subjects, Eligibility, Directory, Notifier
+model.go         the entities, their tables, their own rules, what they may answer with
+*Query.go        the queries on those tables, generated by aru model:build
+policy.go        RatingPolicy (author), OwnerPolicy (owner of a subject), ModerationPolicy (team)
+service.go       RatingService: the author's use cases, and what the three services share
+owner.go         OwnerService: the owner's use cases
+moderation.go    ModerationService: the moderation's use cases
+grants.go        the one place a Grant is scoped to the tenant of a row
+activity.go      the activity log and the notifier
+handlers.go      the controllers of the three sides
+pages.go         what the screens are handed
+screens.go       building it from what a service answered
+migrations.go    the schema
+translation.go   the sentences, in resources/lang
+views.go         the files the application takes ownership of
 ```
 
-`ratingTable`, in `model.go`, declares the table once: its name, the
-`ManualKey` that says the text primary key is written by the application, and
-the default `tenant_id` scope. `Ratings(db)` is generated from it into
-`RatingQuery.go` and returns the concrete `*RatingQuery`; that file is never
-edited by hand, and `aru model:build --check` says when it is stale. Its
-terminals return `*Rating` and `RatingCollection`; keep those pointers
-intact, because copying an embedded Model leaves its `Entity` pointer aimed at
-the original allocation.
+Each entity declares its table once (`ratingTable`, `reportTable`): its name, the
+`ManualKey` that says the text primary key is written by the application,
+`NoTimestamps` because the clock is `Config.Now`, and the default `tenant_id`
+scope. `Ratings(db)` is generated from it into `RatingQuery.go` and returns the
+concrete `*RatingQuery`; those files are never edited by hand, and `aru
+model:build --check` says when one is stale. Keep the pointers the terminals
+return intact, because copying an embedded Model leaves its `Entity` pointer
+aimed at the original allocation.
 
-The rules of the entity itself (invariants, derived values, transitions that
-change only its own fields) live in the custom block of `model.go`, and they
-are pure. The service holds none of them: it validates the request, asks the
-policy for a Grant, calls those rules and saves with the Grant. `Resource` and
-`Collection` are the deliberate response snapshot boundary.
+The rules of an entity itself (when a rating can be edited, what a removal does)
+live in the custom block of `model.go`, and they are pure. A service holds none
+of them: it validates the request, asks the policy, calls those rules and saves
+with the Grant.
+
+Whose is each row: a rating is in the tenant of the account that wrote it, a
+report in the tenant of the owner of the subject, and the moderation is in a third
+one. `internal/platform` holds the same two tables as `Global`, read-only, for the
+reads that cross tenants.
 
 ## What does not exist here
 
@@ -102,79 +109,86 @@ rejected in review. None of them is missing by accident.
 
 | A model reaches for | What is here instead |
 | --- | --- |
-| a service provider, a container, a `Register()` that discovers things | `New(cfg, db, sessions)`, called by hand in the installer's `bootstrap/app.go`. Everything the package touches is a parameter |
-| a global `DB`, an `init()` that opens a connection | the `*data.DB` handed to `New`. A package that opened its own connection would be a package the application cannot point at a test database |
-| a CRUD Repository beside the Model | `Ratings(db)`, reached only by `RatingService` after `security.Authorize` |
-| a tenant read from the path, the body, the query or a header | `data.Tenant(g)`, from the Grant, which came from the session |
-| a permit-all branch in the policy "for now" | nothing. The policy denies, and an action is opened by writing the rule that opens it |
-| an `interface{}` config, a map of options, an env var read at call time | the typed `Config` struct, validated by `New` |
-| a `panic` on bad wiring | an `error` from `New`. A wiring mistake found at boot costs one restart |
-| a third dependency | an argument, first. This module is imported into other people's builds |
-| a command of its own that copies files into a project | `Publishes()`, which declares a tagged tree and nothing more. `aru vendor:publish` asks the application which modules it registered and writes what each one declares, so one command serves every installed package instead of one command per package |
+| a service provider, a container, a `Register()` that discovers things | `New(cfg, db, sessions)`, called by hand in the installer's `bootstrap/app.go` |
+| a global `DB`, an `init()` that opens a connection | the `*data.DB` handed to `New` |
+| a CRUD Repository beside the Model | `Ratings(db)`, reached only by the three services after `security.Authorize` |
+| a tenant read from the path, the body, the query or a header | `data.Tenant(g)`, from the Grant, which came from the session (or, for the moderation, from the report's own row) |
+| a table of subjects, owners or users | the application's `Subjects`, `Eligibility` and `Directory` |
+| a role table, an ACL, a `can_*` column | actions filled by arandu-permission on the subject, decided by the Go policies |
+| a balance, credits or a ledger | arandu-wallet, which this package does not touch |
+| sending an e-mail | the application's `Notifier` |
+| a second log of what happened | arandu-activitylog |
+| rendering Markdown or HTML of a text | nothing: the text is plain and the view escapes it |
+| a permit-all branch in a policy "for now" | nothing. A policy denies, and an action is opened by writing the rule that opens it |
+| an `interface{}` config, a map of options | the typed `Config` struct, validated by `New` |
+| a `panic` on bad wiring | an `error` from `New` |
+| a limit written as a literal in a service | a field of `Config` with a named default |
+| a command of its own that copies files into a project | `Publishes()`, which declares a tagged tree and nothing more |
 
-## The four properties
+## The properties
 
 These are the reason the package is shaped the way it is. A change that breaks
-one of them is not merged, whatever else it improves. `tests/Unit/policy_test.go`
-checks all four against the code.
+one of them is not merged, whatever else it improves.
 
-1. **The policy denies by default**, and has no branch that allows an action.
-   `TestThePolicyDeniesEveryActionByDefault` walks every action with an
-   administrator subject and requires
-   `security.ErrForbidden` from each.
-2. **Every Service method authorizes before it reaches the Model.**
-   `TestEveryServiceMethodAuthorizesBeforeTheModel` checks the source, and
-   `TestTheServiceRefusesBeforeReachingTheModel` gives the Service a nil handle
-   so even constructing `Ratings` in the wrong order fails.
-3. **The tenant comes from `data.Tenant(g)`**, on every path, read and write.
-   `TestTheTenantComesFromTheGrant` and
-   `TestTheServiceWritesTenantOnlyFromTheGrant` hold both halves.
-4. **Nothing reaches the Model without passing the first two.** The denial
-   suite constructs the Service with a nil database, so a call to
-   `Ratings(nil)` would panic. Every refusal it asserts is therefore proof
-   that authorization happened before Model construction.
+1. **The policies deny by default**, and open an action only to a subject that
+   was granted it. No role opens anything. `TestThePoliciesDenyEveryActionByDefault`
+   walks every action with an administrator who holds none, against all three.
+2. **Every exported service method authorizes before it reaches the Model.**
+   `TestEveryServiceMethodAuthorizesBeforeTheModel` reads the source, and
+   `TestTheServicesRefuseBeforeReachingTheModel` gives the services a nil handle
+   so even constructing `Ratings` early fails.
+3. **The tenant comes from `data.Tenant(g)`**, on every write.
+   `TestTheTenantIsWrittenOnlyFromTheGrant` and `TestNoTenantIsReadOutOfTheRequest`
+   hold both halves. The subject of a rating is named by the address, and the
+   service asks the application about it: it is never a scope.
+4. **A Grant without a Policy answering for it is built in `grants.go` alone**,
+   twice (`scopedGrant`: the account's, and the one that names who really acts),
+   each marked `//arandu:system-grant` with what decided first. It narrows a Grant
+   that was issued for the same action to the one tenant a row is in, and a Grant
+   of a subject somebody is only viewing as is not writable through it. The reads
+   that cross tenants go through `internal/platform`, and only after a policy
+   answered. Do not add a third use without a decision.
+5. **A text a person typed reaches a page only escaped.** Nothing in the package
+   converts it to `template.HTML`. `TestNoTextAPersonTypedBecomesMarkup`.
+6. **Only what is published is read or counted by anybody but its author.** The
+   owner's rows carry no text once a rating is removed or deleted, the average
+   counts published ratings, and the owner reads the author by name and never by
+   account.
 
-`policy_test.go` holds those four by calling the code. `tests/Unit/audit_test.go`
-holds the same shape by *reading* it: every exported Service method must call
-`Authorize` before its first `Ratings`, every tenant write in the Service
-comes from `data.Tenant(g)`, and no tenant accessor reads request input.
+`tests/Unit/audit_test.go` holds the same shape by *reading* the code, and
+compares `arandu.mod.toml` against what the code *calls* — `os.WriteFile`,
+`exec.Command`, `http.Get`, a method named `Migrations` — rather than against
+what it imports, because `net/http` is imported by everything with a route and
+says nothing. Both directions fail. What it does not reach is written at the top
+of the file: it reads syntax, so dynamic dispatch, reflection and wrappers
+around the named seams are invisible to it. A green run means no such thing was
+found written down, not that none exists.
 
-It also compares `arandu.mod.toml` against what the code *calls* —
-`os.WriteFile`, `exec.Command`, `http.Get`, a method named `Migrations` — rather
-than against what it imports, because `net/http` is imported by everything with
-a route and says nothing. Both directions fail: used and not declared, which is
-`permission-not-declared` where the doctor runs it, and declared and not used,
-which is a warning there and a failure here because `go test` has one outcome.
-Adding an outbound call, a file write or a process means declaring it in the
-same commit, and the suite is what says so.
-
-The fifth property is not syntax, so it is held where the routes exist.
 `TestNoRouteLandsInTheFrameworkNamespace`, in `tests/Feature/routes_test.go`,
 registers the module and reads the table back: a prefix arrives through
-configuration, and `/_arandu/` is refused when the application boots — in the
-installer's process, after publication.
-
-What the audit does not reach is written at the top of the file it lives in. It
-reads syntax, so dynamic dispatch, reflection, and wrappers around the named
-seams are invisible to it. A green run means no such thing was found written
-down, not that none exists.
+configuration, and `/_arandu/` is refused when the application boots.
+`TestEveryPublishedViewCompiles` publishes the views into a scratch project,
+compiles them with the view compiler an application runs and draws every screen
+once.
 
 ## Writing code
 
 Everything in the source is in English: identifiers, doc comments, internal
 comments, error messages, log messages, and the names and messages of tests.
-`pkg.go.dev` publishes the doc comments and its readers are users of this
-package.
+The sentences a person reads — the screens, the validation messages, the log's
+descriptions — are the exception: they are lines of the catalogue in
+`resources/lang`, in Brazilian Portuguese and English, and the identifiers around
+them stay in English. `pkg.go.dev` publishes the doc comments and its readers are
+users of this package.
 
 Every exported symbol carries a doc comment, and the comment documents the
-symbol and nothing else. Why a signature is what it is belongs there when it is
-a fact about the code — *"the value is held because Go does not build a type
-from a string"* stays. A date, an issue number, a version in progress or the
-name of another repository does not.
+symbol and nothing else. Why a signature is what it is belongs there when it is a
+fact about the code. A date, an issue number, a version in progress or the name of
+another repository does not.
 
 Tests go under `tests/`, in a capitalized category directory declaring a
 lowercase external package: `tests/Unit` holds `package unit_test`,
 `tests/Feature` holds `package feature_test`. Both import the package by its
-module path, which is what makes them see exactly what a caller sees. A test
-that genuinely needs something unexported goes beside the code as
+module path, which is what makes them see exactly what a caller sees. A test that
+genuinely needs something unexported goes beside the code as
 `*_internal_test.go`, and the suffix is how it says so.

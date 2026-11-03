@@ -1,335 +1,122 @@
 ---
 name: rating-module
-description: Change what this Arandu package registers — its routes, handlers, configuration, response shape or schema. Use when the request is to "add a route", "add an endpoint", "add a handler", "add a config option", "change the prefix", "add a field to the response", "add a column", "write a migration", "return the tenant id too", "add a background job to the package", "make it run something at boot", "add a scope", "add a rule to the entity", "regenerate the query", "who is the current user in a handler", "return 404", or when a change touches module.go, config.go, model.go or RatingQuery.go. Covers foundation.Module and the five optional interfaces beside it, why handlers are thin, the RequireAuth guard and ctx.User, returning errors for the router to answer, the generated query and aru model:build, where the rules of the entity live, the migration name that carries the order, and what Resource is for.
+description: Change what this Arandu package registers — its routes, handlers, configuration, response shape, screens, sentences or schema. Use when the request is to "add a route", "add a handler", "add a config option", "change the prefix", "add a field to the response", "add a column", "write a migration", "add a screen", "add a sentence", "add a rule to the entity", "regenerate the query", "return 404", or when a change touches module.go, config.go, handlers.go, model.go, migrations.go, screens.go or a *Query.go file. Covers foundation.Module and its optional interfaces, the route table of the three sides, thin handlers, ctx.User, returning errors for the router to answer, the generated queries and aru model:build, where the rules of an entity live, the migration name that carries the order, what a response may carry, and the catalogue.
 license: MIT
 ---
 
 # The module contract
 
-`foundation.Module` is `Name()` and `Routes()`, and nothing else. That pair is
-the whole public contract between a package and the framework: an application
-calls `New`, gets something that satisfies it, and registers it by hand.
-
-```go
-var (
-	_ foundation.Module     = (*Module)(nil)
-	_ foundation.Migratable = (*Module)(nil)
-)
-```
-
-Those two lines are compile-time proof and they belong at the top of
-`module.go`. Add one for every contract the module takes on, so the failure lands
-here rather than at the registration in somebody else's repository.
-
-## Taking on more than routes
-
-Six interfaces sit beside `Module` in `framework/foundation`, one of which this
-package already implements, and each is opted into the same way — by
-implementing it. Confirm the set for the version in `go.mod` with:
-
-```sh
-export GOWORK=off
-go doc github.com/arandu-io/framework/foundation
-```
-
-| interface | what it is for |
-| --- | --- |
-| `Bootable` | prepare state once, at boot |
-| `Background` | run a loop of the module's own |
-| `Schedulable` | declare work for the scheduler |
-| `Migratable` | own tables — this package implements it |
-| `Health` | report on the storage it depends on |
-| `Closable` | give resources back at shutdown |
-
-Two of them change what `arandu.mod.toml` has to say. A `Background` loop that
-calls out needs `network = true`; anything that writes a file needs
-`filesystem = true`. Declare it in the same commit as the code, or
-`TestTheDeclaredCapabilitiesAreWhatTheCodeDoes` fails and names which of the
-four it was. Nothing downstream would have caught it: `aru doctor` reads the
-application's own tree and never opens an installed package.
+`foundation.Module` is `Name()` and `Routes()` and nothing else. That pair is the
+whole public contract between a package and the framework. This package also
+takes on `Migratable`, `Bootable` (it refuses to boot until its views are
+linked) and `Publishable`; the compile-time proofs sit at the top of `module.go`
+and a new contract adds a line there.
 
 ## Adding a route
 
-**1. Register it in `Routes`, with a name.**
+**1. Add a line to `routeTable` in `config.go`**, with a name, a method, a path
+built from `c.Prefix`, `c.OwnerPrefix` or `c.TeamPrefix` and a `Paths` segment,
+never a literal, and the side it belongs to. The author's and the owner's sides
+are the customer's panel and share a session; the moderation's is the console's.
+The same table is registered on a throwaway mux by `Validate`, so a collision
+fails in `New`. Add the segment to `Paths`, `DefaultPaths`, `PortuguesePaths` and
+`fields()`.
+
+**2. Add the handler** to `handlers()` in `handlers.go`, thin:
 
 ```go
-	r.Action(stdhttp.MethodDelete, m.cfg.Prefix+"/{id}", m.destroy).Name("rating.destroy")
-```
-
-Below the line that is already there, and nowhere above it:
-
-```go
-	r = r.Group("", middleware.RequireAuth(m.sessions))
-```
-
-That line replaces `r` with the guarded group before the first registration, so
-a route added below it needs a session like every other, and there is no
-unguarded router left in scope to add one to by mistake.
-`TestHandlersLeaveTheSubjectAndTheStatusToTheFramework` fails if a route is
-registered before the guard is mounted.
-
-The name is what a URL is built from. Two spellings of one address disagree, and
-the failure when they do is a link to a 404. The prefix is `m.cfg.Prefix` and
-never a literal: the application decides where the package is mounted, and
-`TestTheModuleRegistersItsRoutesUnderItsPrefix` at
-`tests/Feature/routes_test.go:210` mounts it at `/widgets` and fails if any
-route came out anywhere else, or if `everyRoute` does not reach it. It also
-asserts every route is tagged with the module name, which is what
-`aru route:list` groups by.
-
-**2. Write the handler thin.** Read the input and who is asking, ask the
-service, answer:
-
-```go
-func (m *Module) destroy(ctx *fhttp.Context) error {
+func (m *Module) withdraw(ctx *fhttp.Context) error {
 	who, _ := ctx.User()
-	if err := m.svc.Delete(ctx.Ctx(), who, ctx.Param("id")); err != nil {
+	if err := m.ratings.Withdraw(ctx.Ctx(), who, ctx.Param("id")); err != nil {
 		return err
 	}
 	return ctx.Status(stdhttp.StatusNoContent)
 }
 ```
 
-`ctx.User()` reads the subject `RequireAuth` put on the request. Nothing in the
-module loads the session again, and no handler takes an identity from the input.
-The second value it answers is not consulted: behind the guard there is always a
-subject, and the zero one it would answer otherwise is refused by
-`security.Authorize` before any policy runs.
+`register` mounts `RequireAuth` before the first route, so a route added to the
+table needs a session like every other. `ctx.User()` reads the subject the guard
+put on the request; no handler loads the session again or takes an identity from
+the input. Behind the guard there is always a subject, and the zero one is
+refused by `security.Authorize` before any policy runs.
 
-`ctx.Status` and not `ctx.JSON` for an empty answer: `JSON` calls `ToArray()` on
-what it is handed, so a nil resource panics inside the framework rather than
-answering 204.
-
-No rule and no Model construction lives in a handler. A handler that held the
-database or called `Ratings` would bypass the only place the Policy is
-guaranteed to run. Read `rating-policy` before writing the Service method.
-
-**3. Return the error; the router answers it.** The handler writes `return err`
-and nothing else with what the service returned. The framework's action adapter
-answers it, in one place, through the same refusal path the route guards use:
-
-| the service returned | the router answers |
-| --- | --- |
-| `validation.Errors` | 303 back where the request came from, with the messages and what was typed in the flash; to a request that wants JSON, 422 `application/problem+json` with the messages in `errors`, keyed by field |
-| `ErrNotFound`, or any `model.ErrModelNotFound` | 404 |
-| `security.ErrForbidden`, which a policy refusal is | 403 |
-| `security.ErrCSRF` | 419 |
-| `database.ErrUniqueViolation` | 409 |
-| an error with an `HTTPStatus() int` method | that status |
-| anything else | the error page in development, 500 in production |
-
-A request wants JSON when its `Accept` names `application/json`, or when it is an
-XHR that is not htmx; it gets every status above as a problem document rather
-than a page.
-
-The answer is the status and its standard sentence, never the error's own text:
-telling a client why a policy said no tells it what exists, one request at a
-time, and the reason is in the log, where the person operating the system reads
-it and the person probing it does not.
-
-`ErrNotFound` is a 404 because it wraps `model.ErrModelNotFound`;
-`TestTheMissingRecordIsTheModelsNotFound` holds that. A failure of the module's
-own that should answer some other status is an error type with an
-`HTTPStatus() int` method, never a `switch` in the handler.
+**3. Return the error; the router answers it.** `validation.Errors` goes back
+with the messages in the flash (422 for JSON), `ErrNotFound` is 404 because it
+wraps `model.ErrModelNotFound`, a policy refusal is 403.
 `TestHandlersLeaveTheSubjectAndTheStatusToTheFramework` fails on a handler that
-calls `errors.Is` or `errors.As`, `fhttp.Refuse`, `fhttp.Reject` or
-`http.Error`.
+calls `errors.Is`, `fhttp.Refuse` or `http.Error`, that does not read
+`ctx.User()`, or that constructs a query.
 
-**4. Add the case to the route tests.** `everyRoute` at
-`tests/Feature/routes_test.go:118` is a table of every route.
-`TestAVisitorWithNoSessionIsSentToSignIn` asserts each one sends a request with
-no session to `/auth/login`, and `TestASignedInSubjectReachesThePolicyAndIsRefused`
-asserts each one answers a signed-in administrator 403 from the closed policy.
-Both run against `data.Wrap(nil, data.DialectSQLite)` — a handle over no
-database — so a route that got past the policy panics rather than passes.
+**4. Add the case to the tests.** `everyRoute` in `tests/Feature/routes_test.go`
+is a table of every route; the no-session, wrong-side and registered-routes tests
+read it, and so does the count of routes per side.
 
-## Where the subject comes from
+## Changing a Model
 
-`RequireAuth`, mounted once at the top of `Routes`, loads the session. A request
-with none is sent to the sign-in screen and never reaches a handler; a request
-with one carries its subject on the context, and the handler reads it with
-`who, _ := ctx.User()`. Only the subject travels on the context; the Grant is
-still issued by the Policy, per call.
-
-There is no guest on these routes and no tenant in `Config`: the tenant of every
-statement is the one on the Grant, which came from the session of whoever is
-signed in. A public route that wants to know who is looking without requiring a
-session mounts `middleware.LoadSubject` instead, and a reader the package means
-to serve without any session is a `security.Guest` the code declares on purpose
-— open it in the policy first, as `rating-policy` says.
-
-## Changing the Model
-
-`Rating` embeds `model.Model`, and `ratingTable` declares its table once,
-beside it in `model.go`. Keep the application-generated key and the tenant
-default visible there:
-
-```go
-var ratingTable = model.NewTable(model.TableSpec{
-	Name:      "ratings",
-	New:       func() model.Entity { return new(Rating) },
-	ManualKey: true,
-})
-```
-
-`ManualKey` because the key is text the service writes from `data.NewID()`: the
-database neither increments it nor fills it. Do not set `Global: true`: this
-package owns tenant data. Model terminals require a Grant and apply `tenant_id`;
-the Service still calls `security.Authorize` first because the Model does not
-decide which Policy action the Grant represents.
-
-`RatingQuery.go` is generated from that declaration: `Ratings(db)`, the
-`*RatingQuery` it returns, and `RatingCollection`. It is never edited by
-hand. After changing the struct or the table, run
+Each entity embeds `model.Model`; its table is declared once beside it
+(`ratingTable`, `reportTable`), with `ManualKey: true` and `NoTimestamps: true`
+because the key is text the service writes and the timestamps come from
+`Config.Now`. After changing a struct or a table run
 
 ```sh
 aru model:build
 ```
 
-and commit what it rewrote. `aru model:build --check` writes nothing and exits 1
-when the file is missing, stale or hand-edited.
+and commit what it rewrote; `aru model:build --check` exits 1 when a file is
+missing, stale or edited by hand. Keep rows as pointers after `New`, `First` or
+`Get`: a copy keeps the model of the row it was taken from and refuses to write.
+Every query starts at `Ratings(s.db)` or `Reports(s.db)`; the constructor returns
+one mutable query.
 
-Every query starts at `Ratings(s.db)`. The constructor returns one mutable
-query, so a second chain begun from a value held in a variable carries the
-clauses of the first — and compiles.
+The tables that read across tenants -- the owner's reading of the ratings its
+subject received, the averages, the moderation's queue -- are in
+`internal/platform`, `Global`, with their own generated queries. Keep it that
+way: they are reached only from `owner.go`, `moderation.go` and the average in
+`service.go`, after a policy answered, and their rows are copied into snapshots
+that hold no connection.
 
-Keep rows as pointers after `New`, `First`, `Find` or `Get`. A copy keeps the
-model of the row it was taken from, and the model refuses to write through it
-with `model.ErrUnwired`. For the same reason a row from `New()` is filled field
-by field: assigning a whole struct over it replaces its model with the unwired
-one of the literal.
-
-The rules of the entity itself go in the custom block of `model.go`: an
-invariant, a derived value, a transition that changes only the fields of the
-row, written as a pure method — no database, no network, no clock read inside,
-no Grant; a time it stamps arrives as a parameter. A guard and the transition it
-protects come as a pair:
-
-```go
-// arandu:begin custom
-
-// CanRename reports whether the record may take this name.
-func (s Rating) CanRename(name string) bool { return name != "" && name != s.Name }
-
-// Rename gives the record a new name, and refuses one it cannot take.
-func (s *Rating) Rename(name string) error {
-	if !s.CanRename(name) {
-		return fmt.Errorf("rating: %q cannot be the new name of this record", name)
-	}
-	s.Name = name
-	return nil
-}
-
-// arandu:end custom
-```
-
-A local scope is a method on `*RatingQuery` in the same block, and a relation
-is registered on `ratingTable` from an `init` function:
-
-```go
-// Named narrows the query to the records with this name.
-func (q *RatingQuery) Named(name string) *RatingQuery {
-	return q.Where("name", "=", name)
-}
-```
-
-The Service orchestrates around them: it validates the request, asks the Policy
-for the Grant, calls the rule, and saves with that Grant.
-
-This table declares `created_at` but not `updated_at`. The Hesape Model stamps a
-timestamp only when the entity declares its column, so creation remains correct
-without changing the published migration or disabling timestamps globally.
-
-## Adding a configuration field
-
-`Config` is a typed struct, and that is the point: a misspelled key in a map is
-a setting that silently keeps its default, and here a field that does not exist
-does not compile.
-
-Three things move together for every new field.
-
-- **A doc comment on the field**, saying what it means and where it may come
-  from.
-- **A rule in `Validate`** if there is a value it cannot be. `New` calls
-  `Validate` before anything else, so a setting that cannot work fails where it
-  is wired rather than on the first request that needed it.
-- **A default in `withDefaults`**, as a named constant beside `DefaultPrefix`
-  and `DefaultPageSize`, if zero is meant to mean something. `withDefaults` runs
-  *after* `Validate` and never before: filling a default in first hides the
-  value somebody actually wrote from the check that would have refused it.
-
-A value out of range is refused rather than clamped. A number somebody wrote and
-did not get is worse than a number somebody wrote and was told about — that is
-why `PageSize` above `MaxPageSize` is an error and not a silent 200.
-
-Add the case to `TestTheConfigurationRefusesWhatCannotWork` at
-`tests/Unit/policy_test.go:298`, which is a map of named bad configurations, and
-to `TestNewRefusesAWiringThatCannotWork` at `tests/Feature/routes_test.go:267`
-if the field can make `New` fail.
+The rules of an entity go in the custom block of `model.go` as pure methods (no
+database, no clock read inside: the time arrives as a parameter). The services
+orchestrate and hold none.
 
 ## What may leave in a response
 
-`Resource` and `Collection` in `model.go` are declared snapshots, not direct
-encoding of the entity. This also defines the safe copy boundary: Model-backed
-Service results stay as `*Rating`/`[]*Rating`, because a copied row keeps
-the model of the original and refuses to be written. A response snapshot reads
-only the explicit fields and cannot be saved.
+`authorFields`, `ownerFields`, `ownerReportFields` and `teamReportFields` in
+`model.go` are the declared lists. The author's carries the state and the
+moderation's reason; the owner's carries the author by name and no identifier of
+their account; the team's adds the tenants. A new column that should be seen is
+added in the struct and in the right list; one that should not is added in the
+struct only. `TenantID` is in no customer response. A text a person typed reaches
+a page only escaped by the view: nothing in the package converts it to
+`template.HTML`.
 
-An encoder handed the entity would answer with whatever fields it happens to
-have, including the embedded Model and anything added later without opening the
-handler. `TenantID` names another customer's identifier and belongs in no
-response.
+## Adding a configuration field
 
-So a new column that should be visible is added in two places: the struct in
-`model.go`, and the map `ToArray` returns. A column that should not be visible
-is added in one.
+A doc comment on the field; a rule in `Validate` if there is a value it cannot be
+(a value out of range is refused, not clamped); a default in `withDefaults` as a
+named constant, which runs after `Validate`; and a case in
+`TestNewRefusesAWiringThatCannotWork` and `TestTheConfigurationRefusesWhatCannotWork`.
+A limit of the business -- a length, a window, whether the moderation may change
+the stars -- is a field, never a literal in a service.
 
-`With()` is what goes *beside* the fields at the top level. `ctx.JSON` puts what
-`ToArray` returns under a fixed `"data"` key and merges what `With` returns next
-to it, so `Collection` answers `{"data": {"items": [...]}, "next_cursor": "..."}`.
-The cursor describes the answer rather than the things answered with. A resource
-with nothing to add returns nil.
+## Sentences and screens
 
-The cursor is only offered for a full page:
-
-```go
-	if len(records) == m.cfg.PageSize {
-		cursor = records[len(records)-1].ID
-	}
-```
-
-A short page is the last one, and offering a cursor for it offers a next page
-that comes back empty.
+Every sentence is a line of `resources/lang/<locale>/rating.json`, in every
+shipped locale with the same placeholders; `tests/Unit/translation_test.go`
+fails on a missing, extra or unused line. A screen is a `.kyse.go` file under
+`resources/views/modules/rating/`, with its page data in `pages.go` and its
+builder in `screens.go`; add it to the render probe in
+`tests/Unit/published_views_compile_test.go`, which also fails on an inline
+script, style or event attribute. Stars are Kyse's `Rating` group of radios:
+`ReadOnly` to show a score, one `Name` per row in a list, because radios of one
+name are one choice.
 
 ## Adding a migration
 
-Append it to the slice `Migrations()` returns, and give it a name that sorts
-after the last one:
-
-```go
-func (createRatings) GetName() string { return "20260823_0001_create_ratings" }
-```
-
-**The name carries the order and nothing else does.** `TestTheModuleDeclaresItsSchema`
-at `tests/Feature/routes_test.go:301` requires the returned names to be sorted,
-requires none to be empty, and requires every one to satisfy
-`migrations.ReversibleMigration` — the migrator finds `Down` by type assertion,
-so a `Down` with the wrong signature is a rollback that silently does nothing.
-
-Three rules the existing migration keeps:
-
-- **A name is fixed once the package is published.** Changing what an applied
-  name means leaves the change missing everywhere it already ran, and nothing
-  says so.
-- **Types that spell the same in SQLite, PostgreSQL and MySQL.** Identifier
-  columns are `VARCHAR(255)` rather than `TEXT` because they take part in a key
-  and MySQL refuses `TEXT` in one without a prefix length. Timestamps get no
-  database default: the value comes from Go, for the same reason ids do —
-  `gen_random_uuid`, `UUID()` and `randomblob` are three spellings of one idea.
-- **An index that matches the `ORDER BY` of the listing, tenant first.** Without
-  it every page is a scan of every customer's rows.
-
-Migrations do not run at boot. `aru migrate` is a step in the installer's
-pipeline, and every migration has to be compatible with the previous binary
-during a rollout: a new column is nullable or has a default, and removing one
-takes two releases.
+Append it to `Migrations()` with a name that sorts after the last one:
+`20261103_0001_create_ratings` is fixed once published, so a change is a new
+migration. `TestTheModuleDeclaresItsSchema` requires sorted names and a `Down`
+with the right signature. Use types that spell the same in SQLite, PostgreSQL
+and MySQL, give timestamps no database default, and index to match the `ORDER BY`
+of the listing, tenant first. A new column is nullable or has a default, and
+removing one takes two releases. Migrations never run at boot.
