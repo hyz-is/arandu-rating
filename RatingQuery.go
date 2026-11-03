@@ -524,9 +524,7 @@ func (c RatingCollection) Except(keys ...any) RatingCollection {
 	return RatingCollectionOf(c.Rows().Except(keys...))
 }
 
-func (c RatingCollection) Unique() RatingCollection {
-	return RatingCollectionOf(c.Rows().Unique())
-}
+func (c RatingCollection) Unique() RatingCollection { return RatingCollectionOf(c.Rows().Unique()) }
 
 func (c RatingCollection) Load(ctx context.Context, g auth.Grant, relations ...string) error {
 	return c.Rows().Load(ctx, g, relations...)
