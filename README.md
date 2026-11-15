@@ -46,7 +46,7 @@ and expects the application to administer permissions with
 
 An Arandu application registers a module explicitly. There is no service
 provider, no container and no discovery, so these are the lines to paste into
-`bootstrap/app.go` and there are no others.
+`bootstrap/app.go`, and the views add imports below.
 
 The import, with the other module imports:
 
@@ -56,8 +56,11 @@ import (
 )
 ```
 
-The construction, in `Build`, after the session store and the activity log exist
-and before `k.Register`:
+The construction, in `App`, once `NewAppServiceProvider` has returned and the
+activity log exists. `New` refuses a wiring that cannot work and `Configure` has
+no way to return that error, so the module is built where the error can leave;
+the database and the session store are the ones the framework built from the
+configuration:
 
 ```go
 	ratingModule, err := rating.New(rating.Config{
@@ -86,21 +89,24 @@ and before `k.Register`:
 		// moderation's alone.
 		Middleware:     []func(http.Handler) http.Handler{permissionModule.Roles()},
 		TeamMiddleware: []func(http.Handler) http.Handler{consoleGuard},
-	}, db, sessions)
+	}, drivers.DB, drivers.Sessions)
 	if err != nil {
-		return App{}, err
+		_ = drivers.Close()
+		return nil, err
 	}
 ```
 
-And the registration, inside the `k.Register(...)` call already there:
+And the registration, in the `WithProviders(...)` chain the builder is made of:
 
 ```go
-		ratingModule,
+	return Configure(cfg, drivers, app).
+		WithProviders(ratingModule).
+		WithVersion(version, commit).
+		Create()
 ```
 
 An application that keeps the sides on different routers mounts them itself,
-each with its own guards, instead of registering the routes through
-`k.Register`:
+each with its own guards:
 
 ```go
 ratingModule.CustomerRoutes(panel)  // the author's and the owner's, with the panel's guards
