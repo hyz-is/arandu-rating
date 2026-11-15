@@ -50,7 +50,7 @@ package's own suite.
 
 ```toml
 name = "hyz-is/rating"
-framework = ">= 0.67"
+framework = ">= 0.69"
 profiles = ["conventional", "performance"]
 
 [permissions]
@@ -68,7 +68,7 @@ the suite. The package keeps no file of its own, which is why `filesystem` is `f
 `os.WriteFile` added here changes the manifest in the same commit.
 
 The `framework` line is a floor and a second declaration of what `go.mod` says:
-`framework = ">= 0.67"`. Move both together when you bump.
+`framework = ">= 0.69"`. Move both together when you bump.
 
 ## Dependencies
 
